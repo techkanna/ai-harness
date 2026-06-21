@@ -1,0 +1,26 @@
+{
+  "name": "explore-harness",
+  "version": "0.1.0",
+  "description": "Basic to advanced JavaScript agent harness for a local model.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "basic": "npm run build && node dist/src/examples/basic.js",
+    "advanced": "npm run build && node dist/src/examples/advanced.js",
+    "explore": "npm run build && node dist/src/examples/explore.js",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.5",
+    "typescript": "^5.6.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agent",
+    "harness",
+    "javascript",
+    "local-llm"
+  ]
+}
