@@ -11,7 +11,7 @@ const agent = new AgentHarness({
   systemPrompt: SYSTEM_PROMPT,
   maxIterations: 25,
   maxContextMessages: 50,
-  logLevel: 'debug',
+  logLevel: 'silent',
 });
 
 async function run(): Promise<void> {
@@ -32,22 +32,22 @@ Do the following tasks in order, using the appropriate tools:
   try {
     const result = await agent.run(input, { signal: controller.signal });
 
-    console.log('\n=== Agent Result ===');
-    console.log('Type:', result.type);
-    console.log('Iterations:', result.iterationCount);
-    console.log('Steps:', result.steps.length);
+    // console.log('\n=== Agent Result ===');
+    // console.log('Type:', result.type);
+    // console.log('Iterations:', result.iterationCount);
+    // console.log('Steps:', result.steps.length);
     console.log('\n--- Final Answer ---');
-    console.log(result.text);
+    // console.log(result.text);
     console.log(JSON.stringify(result));
 
-    if (result.steps.length > 0) {
-      console.log('\n--- Execution Trace ---');
-      for (const step of result.steps) {
-        const argsStr = JSON.stringify(step.toolArgs);
-        console.log(`  [${step.iteration}] ${step.toolName}(${argsStr.slice(0, 80)}${argsStr.length > 80 ? '...' : ''})`);
-        console.log(`       → ${step.toolResult.slice(0, 120)}${step.toolResult.length > 120 ? '...' : ''}`);
-      }
-    }
+    // if (result.steps.length > 0) {
+    //   console.log('\n--- Execution Trace ---');
+    //   for (const step of result.steps) {
+    //     const argsStr = JSON.stringify(step.toolArgs);
+    //     console.log(`  [${step.iteration}] ${step.toolName}(${argsStr.slice(0, 80)}${argsStr.length > 80 ? '...' : ''})`);
+    //     console.log(`       → ${step.toolResult.slice(0, 120)}${step.toolResult.length > 120 ? '...' : ''}`);
+    //   }
+    // }
   } finally {
     clearTimeout(timeout);
   }

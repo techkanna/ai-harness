@@ -1,8 +1,8 @@
 import type { LocalLlmClient } from './client.js';
-import type { Tool, ApiToolDefinition, ConversationMessage } from './types.js';
+import type { Tool, ApiToolDefinition, ConversationMessage, AgentEvent } from './types.js';
 
-// Re-export Tool so consumers can import from either place
-export type { Tool } from './types.js';
+// Re-export types so consumers can import from either place
+export type { Tool, AgentEvent } from './types.js';
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
@@ -86,6 +86,8 @@ export interface AgentResult {
 export interface RunOptions {
   /** An AbortSignal to cancel the agent loop externally. */
   signal?: AbortSignal;
+  /** Callback for real-time agent events (streaming text, tool calls, etc.). */
+  onEvent?: (event: AgentEvent) => void;
 }
 
 // ─── AgentHarness ───────────────────────────────────────────────────────────
@@ -136,7 +138,8 @@ export class AgentHarness {
   // ── Core agentic loop ───────────────────────────────────────────────────
 
   async run(userInput: string, options: RunOptions = {}): Promise<AgentResult> {
-    const { signal } = options;
+    const { signal, onEvent } = options;
+    const emit = onEvent ?? (() => {});
     const steps: AgentStep[] = [];
 
     // Build the initial conversation.
@@ -169,16 +172,23 @@ export class AgentHarness {
       // ── Truncate conversation if needed ───────────────────────────────
       this.truncateConversation(conversation);
 
-      // ── Call the LLM ──────────────────────────────────────────────────
+      // ── Call the LLM (streaming) ───────────────────────────────────────
       const messages = [...systemMessages, ...conversation];
       this.log.info(`Iteration ${iteration}: sending ${messages.length} messages to LLM.`);
       this.log.debug('Messages:', JSON.stringify(messages, null, 2));
 
-      let response;
+      emit({ type: 'llm_start', iteration });
+
+      let streamResult;
       try {
-        response = await this.client.chat(messages, {
-          tools: this.apiToolDefs.length > 0 ? this.apiToolDefs : undefined,
-        });
+        streamResult = await this.client.streamChatWithTools(
+          messages,
+          {
+            tools: this.apiToolDefs.length > 0 ? this.apiToolDefs : undefined,
+          },
+          (delta) => emit({ type: 'text_delta', delta }),
+          (delta) => emit({ type: 'thinking_delta', delta }),
+        );
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         this.log.error(`LLM request failed at iteration ${iteration}: ${errMsg}`);
@@ -189,30 +199,41 @@ export class AgentHarness {
           iterationCount: iteration,
         };
       }
-      this.log.debug(`LLM full response (iteration ${iteration}):`, response);
 
-      const choice = response?.choices?.[0];
-      const assistantMessage = choice?.message;
-      const assistantText = assistantMessage?.content ?? null;
-      const toolCalls = assistantMessage?.tool_calls;
+      const assistantText = streamResult.content || null;
+      const toolCalls = streamResult.toolCalls.length > 0 ? streamResult.toolCalls : undefined;
 
       this.log.debug(`LLM response (iteration ${iteration}):`, assistantText);
 
-      // ── No tool calls → make a final summary call ──────────────────────
+      // ── No tool calls → return the reply ────────────────────────────────
       if (!toolCalls || toolCalls.length === 0) {
-        this.log.info(`Iteration ${iteration}: LLM returned no tool calls. Making final summary call.`);
+        this.log.info(`Iteration ${iteration}: LLM returned no tool calls.`);
         conversation.push({ role: 'assistant', content: assistantText });
 
-        const finalText = await this.getWrapUpResponse(
-          systemMessages,
-          conversation,
-          'All tool calls are complete. Please provide a clear, concise summary of what you did and the results. Do NOT call any more tools.',
-          assistantText ?? '',
-        );
+        // If tools were used in earlier iterations, make a final summary call.
+        // Otherwise the LLM answered directly — text was already streamed.
+        if (steps.length > 0) {
+          const finalText = await this.getWrapUpResponse(
+            systemMessages,
+            conversation,
+            'All tool calls are complete. Please provide a clear, concise summary of what you did and the results. Do NOT call any more tools.',
+            assistantText ?? '',
+            (delta) => emit({ type: 'text_delta', delta }),
+          );
 
+          emit({ type: 'complete' });
+          return {
+            type: 'reply',
+            text: finalText,
+            steps,
+            iterationCount: iteration,
+          };
+        }
+
+        emit({ type: 'complete' });
         return {
           type: 'reply',
-          text: finalText,
+          text: assistantText ?? '',
           steps,
           iterationCount: iteration,
         };
@@ -248,6 +269,8 @@ export class AgentHarness {
           // Unknown tool — tell the LLM so it can correct itself.
           const errText = `[ERROR] Tool not found: "${toolName}". Available tools: ${this.tools.map((t) => t.name).join(', ')}`;
           this.log.warn(`Iteration ${iteration}: ${errText}`);
+          emit({ type: 'tool_call_start', iteration, name: toolName, args: parsedArgs });
+          emit({ type: 'tool_call_end', iteration, name: toolName, result: errText });
           conversation.push({ role: 'tool', tool_call_id: toolCallId, content: errText });
 
           steps.push({
@@ -261,6 +284,8 @@ export class AgentHarness {
           continue;
         }
 
+        emit({ type: 'tool_call_start', iteration, name: tool.name, args: parsedArgs });
+
         // Execute the tool with error handling.
         let toolResult: string;
         try {
@@ -272,6 +297,8 @@ export class AgentHarness {
           toolResult = `[ERROR] Tool "${tool.name}" failed: ${errMsg}`;
           this.log.warn(`Iteration ${iteration}: ${toolResult}`);
         }
+
+        emit({ type: 'tool_call_end', iteration, name: tool.name, result: toolResult });
 
         this.log.debug(`Tool result (${tool.name}):`, toolResult);
 
@@ -298,8 +325,10 @@ export class AgentHarness {
       conversation,
       'You have reached the maximum number of iterations. Please provide your best final answer now based on the work you have done so far. Do NOT call any more tools.',
       `Agent stopped: reached maximum of ${this.maxIterations} iterations without a final answer.`,
+      (delta) => emit({ type: 'text_delta', delta }),
     );
 
+    emit({ type: 'complete' });
     return {
       type: 'max_iterations',
       text: finalText,
@@ -308,52 +337,25 @@ export class AgentHarness {
     };
   }
 
-  // ── Streaming run ─────────────────────────────────────────────────────
-
-  /**
-   * Stream a single-turn response from the LLM.
-   *
-   * NOTE: Streaming with tool-call support requires parsing chunked
-   * tool_calls deltas, which is significantly more complex. For now this
-   * method supports simple non-tool streaming. For tool-calling workflows,
-   * use the `run()` method instead.
-   */
-  async streamRun(
-    userInput: string,
-    onDelta: (delta: string) => void,
-    options: Record<string, unknown> = {}
-  ): Promise<AgentResult> {
-    const messages: ConversationMessage[] = [
-      { role: 'system', content: this.systemPrompt },
-      ...this.memory.map((item) => ({ role: 'system', content: item })),
-      { role: 'user', content: userInput },
-    ];
-
-    let accumulated = '';
-    await this.client.streamChat(messages, options, (delta) => {
-      accumulated += delta;
-      onDelta(delta);
-    });
-
-    return { type: 'reply', text: accumulated, steps: [], iterationCount: 1 };
-  }
-
   // ── Private helpers ───────────────────────────────────────────────────
 
   /**
    * Make one final LLM call without tools to get a plain-text summary.
    * Used by both the normal-completion and max-iterations exit paths.
+   * Streams output via the optional onTextDelta callback.
    *
    * @param systemMessages  The system-level messages (system prompt + memory).
    * @param conversation    The full conversation history (will be truncated for the call).
    * @param wrapUpPrompt    The user-role prompt appended to ask for a summary.
    * @param fallbackText    Returned if the LLM call fails.
+   * @param onTextDelta     Optional callback for streaming the summary text.
    */
   private async getWrapUpResponse(
     systemMessages: ConversationMessage[],
     conversation: ConversationMessage[],
     wrapUpPrompt: string,
     fallbackText: string,
+    onTextDelta?: (delta: string) => void,
   ): Promise<string> {
     const wrapUpMessages: ConversationMessage[] = [
       ...systemMessages,
@@ -362,10 +364,13 @@ export class AgentHarness {
     ];
 
     try {
-      // No tools on the final call — force a plain text response.
-      const finalResponse = await this.client.chat(wrapUpMessages);
-      const extracted = finalResponse?.choices?.[0]?.message?.content;
-      if (extracted) return extracted;
+      // No tools on the final call — force a plain text response, streamed.
+      const result = await this.client.streamChatWithTools(
+        wrapUpMessages,
+        {},
+        onTextDelta,
+      );
+      if (result.content) return result.content;
     } catch {
       this.log.error('Failed to get wrap-up response from LLM.');
     }

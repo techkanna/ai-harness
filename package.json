@@ -1,10 +1,14 @@
 {
-  "name": "explore-harness",
+  "name": "sk",
   "version": "0.1.0",
-  "description": "Basic to advanced JavaScript agent harness for a local model.",
+  "description": "Minimalistic AI agent CLI for local models.",
   "type": "module",
+  "bin": {
+    "sk": "./dist/src/cli.js"
+  },
   "scripts": {
     "build": "tsc",
+    "start": "npm run build && node dist/src/cli.js",
     "basic": "npm run build && node dist/src/examples/basic.js",
     "advanced": "npm run build && node dist/src/examples/advanced.js",
     "explore": "npm run build && node dist/src/examples/explore.js",

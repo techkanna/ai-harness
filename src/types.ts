@@ -66,3 +66,23 @@ export interface ConversationMessage {
   /** Present on tool-result messages — links back to the tool_call id. */
   tool_call_id?: string;
 }
+
+// ─── Streaming result ───────────────────────────────────────────────────────
+
+/** Accumulated result from a streaming chat call with tool support. */
+export interface StreamChatResult {
+  content: string;
+  toolCalls: ApiToolCall[];
+  finishReason: string;
+}
+
+// ─── Agent Events ───────────────────────────────────────────────────────────
+
+/** Events emitted by the agent loop for real-time rendering. */
+export type AgentEvent =
+  | { type: 'llm_start'; iteration: number }
+  | { type: 'text_delta'; delta: string }
+  | { type: 'thinking_delta'; delta: string }
+  | { type: 'tool_call_start'; iteration: number; name: string; args: Record<string, unknown> }
+  | { type: 'tool_call_end'; iteration: number; name: string; result: string }
+  | { type: 'complete' };
