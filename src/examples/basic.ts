@@ -14,6 +14,7 @@ async function run(): Promise<void> {
   const input = 'Explain the difference between an agent and a normal chat completion.';
   const result = await agent.run(input);
   console.log('Result type:', result.type);
+  console.log('Iterations:', result.iterationCount);
   console.log('Response:');
   console.log(result.text);
 }

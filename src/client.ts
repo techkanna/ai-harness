@@ -1,3 +1,5 @@
+import type { ApiToolCall, ApiToolDefinition } from './types.js';
+
 export interface LocalLlmClientOptions {
   baseUrl?: string;
   model?: string;
@@ -6,9 +8,12 @@ export interface LocalLlmClientOptions {
 }
 
 export interface LlmResponseChoice {
+  finish_reason?: string; // 'stop', 'tool_calls', 'length', etc.
   message?: {
-    content?: string;
+    role?: string;
+    content?: string | null;
     reasoning_content?: string;
+    tool_calls?: ApiToolCall[];
   };
   text?: string;
   delta?: {
@@ -19,6 +24,21 @@ export interface LlmResponseChoice {
 
 export interface LlmResponse {
   choices?: LlmResponseChoice[];
+}
+
+export interface ChatOptions {
+  temperature?: number;
+  max_tokens?: number;
+  top_p?: number;
+  top_k?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  stop?: string[];
+  /** OpenAI-compatible tool definitions. When provided, the model can return tool_calls. */
+  tools?: ApiToolDefinition[];
+  /** Controls how the model selects tools. Default: 'auto'. */
+  tool_choice?: string | Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 import { DEFAULT_LOCAL_LLM_BASE_URL, DEFAULT_LOCAL_LLM_MAX_TOKENS, DEFAULT_LOCAL_LLM_MODEL_NAME, DEFAULT_LOCAL_LLM_REQUEST_PATH } from './config.js';
@@ -46,13 +66,12 @@ export function createLocalLlmClient({
     return response.json();
   }
 
-  async function chat(messages: unknown[], options: Record<string, unknown> = {}): Promise<LlmResponse> {
-    const body = {
+  async function chat(messages: unknown[], options: ChatOptions = {}): Promise<LlmResponse> {
+    const body: Record<string, unknown> = {
       model,
       messages,
-      // options with defaults
       temperature: options.temperature ?? 1.0,
-      max_tokens: options.max_tokens ?? maxTokens,   
+      max_tokens: options.max_tokens ?? maxTokens,
       top_p: options.top_p ?? 0.95,
       top_k: options.top_k ?? 64,
       presence_penalty: options.presence_penalty ?? 0,
@@ -60,25 +79,31 @@ export function createLocalLlmClient({
       stop: options.stop
     };
 
+    // Only include tools in the request body when tools are provided.
+    // This avoids sending an empty array which some servers reject.
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools;
+      body.tool_choice = options.tool_choice ?? 'auto';
+    }
+
     return request(body);
   }
 
-  async function completion(prompt: string, options: Record<string, unknown> = {}): Promise<LlmResponse> {
+  async function completion(prompt: string, options: ChatOptions = {}): Promise<LlmResponse> {
     const messages = [{ role: 'user', content: prompt }];
     return chat(messages, options);
   }
 
   async function streamChat(
     messages: unknown[],
-    options: Record<string, unknown> = {},
+    options: ChatOptions = {},
     onDelta: (delta: string) => void
   ): Promise<void> {
-    const body = {
+    const body: Record<string, unknown> = {
       model,
       messages,
-      // options with defaults
       temperature: options.temperature ?? 1.0,
-      max_tokens: options.max_tokens ?? maxTokens,   
+      max_tokens: options.max_tokens ?? maxTokens,
       top_p: options.top_p ?? 0.95,
       top_k: options.top_k ?? 64,
       presence_penalty: options.presence_penalty ?? 0,
@@ -86,6 +111,11 @@ export function createLocalLlmClient({
       stop: options.stop,
       stream: true
     };
+
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools;
+      body.tool_choice = options.tool_choice ?? 'auto';
+    }
 
     const response = await fetch(url, {
       method: 'POST',
