@@ -1,5 +1,5 @@
 import { createLocalLlmClient } from '../client.js';
-import { AgentHarness } from '../agent.js';
+import { AgentHarness } from '../agent/index.js';
 
 const client = createLocalLlmClient({
   requestPath: '/v1/chat/completions'

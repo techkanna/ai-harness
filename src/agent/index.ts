@@ -1,8 +1,8 @@
-import type { LocalLlmClient } from './client.js';
-import type { Tool, ApiToolDefinition, ConversationMessage, AgentEvent } from './types.js';
+import type { LocalLlmClient } from '../client.js';
+import type { Tool, ApiToolDefinition, ConversationMessage, AgentEvent } from '../types.js';
 
 // Re-export types so consumers can import from either place
-export type { Tool, AgentEvent } from './types.js';
+export type { Tool, AgentEvent } from '../types.js';
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
@@ -60,6 +60,8 @@ export interface AgentHarnessOptions {
   maxIterations?: number;
   /** Maximum number of conversation messages (excluding system) before truncation kicks in. Default: 50 */
   maxContextMessages?: number;
+  /** Maximum tokens for the context-summarization LLM call. Default: 1024 */
+  summaryMaxTokens?: number;
   /** Logging verbosity. Default: 'info' */
   logLevel?: LogLevel;
 }
@@ -98,6 +100,7 @@ export class AgentHarness {
   private memory: string[];
   private maxIterations: number;
   private maxContextMessages: number;
+  private summaryMaxTokens: number;
   private log: Logger;
 
   /** The API-ready tool definitions, built once from the Tool[] array. */
@@ -111,6 +114,7 @@ export class AgentHarness {
     systemPrompt = 'You are a helpful assistant agent.',
     maxIterations = 25,
     maxContextMessages = 50,
+    summaryMaxTokens = 1024,
     logLevel = 'info',
   }: AgentHarnessOptions) {
     this.client = client;
@@ -119,6 +123,7 @@ export class AgentHarness {
     this.systemPrompt = systemPrompt;
     this.maxIterations = maxIterations;
     this.maxContextMessages = maxContextMessages;
+    this.summaryMaxTokens = summaryMaxTokens;
     this.log = new Logger(logLevel);
 
     // Convert tools to API format once at construction time.
@@ -150,7 +155,6 @@ export class AgentHarness {
     ];
 
     // Conversation messages: these grow and can be truncated.
-    // The user message is JUST the user's question — no tool boilerplate.
     const conversation: ConversationMessage[] = [
       { role: 'user', content: userInput },
     ];
@@ -170,7 +174,7 @@ export class AgentHarness {
       }
 
       // ── Truncate conversation if needed ───────────────────────────────
-      this.truncateConversation(conversation);
+      await this.truncateConversation(conversation);
 
       // ── Call the LLM (streaming) ───────────────────────────────────────
       const messages = [...systemMessages, ...conversation];
@@ -357,9 +361,10 @@ export class AgentHarness {
     fallbackText: string,
     onTextDelta?: (delta: string) => void,
   ): Promise<string> {
+    const truncatedConversation = await this.truncateForFinalCall(conversation);
     const wrapUpMessages: ConversationMessage[] = [
       ...systemMessages,
-      ...this.truncateForFinalCall(conversation),
+      ...truncatedConversation,
       { role: 'user', content: wrapUpPrompt },
     ];
 
@@ -394,47 +399,129 @@ export class AgentHarness {
   }
 
   /**
+   * Summarize a segment of dropped conversation messages using the LLM.
+   * Returns a structured summary string, or a simple fallback notice on failure.
+   */
+  private async summarizeDroppedMessages(
+    droppedMessages: ConversationMessage[]
+  ): Promise<string> {
+    const serialized = droppedMessages
+      .map((msg) => {
+        const role = msg.role.toUpperCase();
+        if (msg.tool_calls) {
+          const calls = msg.tool_calls
+            .map((tc) => `  → ${tc.function.name}(${tc.function.arguments})`)
+            .join('\n');
+          return `[${role}]: ${msg.content ?? '(no text)'}\nTool calls:\n${calls}`;
+        }
+        if (msg.tool_call_id) {
+          return `[TOOL RESULT (${msg.tool_call_id})]: ${msg.content}`;
+        }
+        return `[${role}]: ${msg.content}`;
+      })
+      .join('\n\n');
+
+    const summarizationPrompt = [
+      {
+        role: 'system',
+        content:
+          'You are a precise conversation summarizer. Your job is to produce a concise but thorough summary of a conversation segment from an AI agent loop. Preserve ALL important details.',
+      },
+      {
+        role: 'user',
+        content: `Summarize the following conversation segment. Capture:
+1. **Key decisions and reasoning** — why the agent chose certain actions.
+2. **Tool calls and results** — which tools were called, with what arguments, and what they returned (condense large outputs but keep critical data).
+3. **Important facts and data** — any values, names, paths, URLs, or numbers discovered.
+4. **Current task state** — what has been accomplished and what remains.
+
+Be concise but DO NOT omit any fact that could be needed to continue the task correctly.
+
+---
+CONVERSATION SEGMENT (${droppedMessages.length} messages):
+
+${serialized}
+---
+
+Provide the summary now:`,
+      },
+    ];
+
+    try {
+      this.log.info(`Summarizing ${droppedMessages.length} dropped messages via LLM...`);
+      const result = await this.client.streamChatWithTools(
+        summarizationPrompt,
+        { max_tokens: this.summaryMaxTokens },
+      );
+      if (result.content && result.content.trim().length > 0) {
+        this.log.info(`Summary generated (${result.content.length} chars).`);
+        return result.content.trim();
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      this.log.warn(`Summarization LLM call failed: ${errMsg}. Falling back to naive truncation.`);
+    }
+
+    // Fallback: return a simple notice if summarization fails.
+    return `[Summarization unavailable. ${droppedMessages.length} earlier messages were removed to fit the context window.]`;
+  }
+
+  /**
    * Sliding-window truncation of the conversation array (mutates in place).
    * Keeps the first message (original user query) and the most recent messages.
-   * Inserts a truncation notice so the LLM knows history was dropped.
+   * Uses the LLM to summarize the dropped middle segment so context is preserved.
+   * Falls back to a simple truncation notice if summarization fails.
    */
-  private truncateConversation(conversation: ConversationMessage[]): void {
+  private async truncateConversation(conversation: ConversationMessage[]): Promise<void> {
     if (conversation.length <= this.maxContextMessages) return;
 
     const firstMessage = conversation[0]; // original user query
-    const tailSize = this.maxContextMessages - 2; // -1 for first msg, -1 for truncation notice
+    const tailSize = this.maxContextMessages - 2; // -1 for first msg, -1 for summary message
     const tail = conversation.slice(-tailSize);
-    const droppedCount = conversation.length - 1 - tailSize;
+    const droppedMessages = conversation.slice(1, conversation.length - tailSize);
 
-    this.log.info(`Truncating conversation: dropping ${droppedCount} messages from middle. Keeping first + last ${tailSize}.`);
+    this.log.info(`Truncating conversation: summarizing ${droppedMessages.length} messages from middle. Keeping first + last ${tailSize}.`);
+
+    const summary = await this.summarizeDroppedMessages(droppedMessages);
 
     // Mutate in place: clear and rebuild.
     conversation.length = 0;
     conversation.push(firstMessage);
     conversation.push({
       role: 'system',
-      content: `[Context truncated: ${droppedCount} earlier messages were removed to fit the context window. The original user request and the most recent messages are preserved.]`,
+      content: `[Context Summary: The following is an LLM-generated summary of ${droppedMessages.length} earlier messages that were condensed to fit the context window.]
+
+${summary}`,
     });
     conversation.push(...tail);
   }
 
   /**
    * Build a truncated copy of the conversation for the final wrap-up call.
-   * We don't want to send an enormous history for the summary.
+   * Uses the LLM to summarize dropped messages so the final summary is comprehensive.
    */
-  private truncateForFinalCall(
+  private async truncateForFinalCall(
     conversation: ConversationMessage[]
-  ): ConversationMessage[] {
+  ): Promise<ConversationMessage[]> {
     const maxForFinal = Math.min(this.maxContextMessages, 30);
     if (conversation.length <= maxForFinal) return [...conversation];
 
     const firstMessage = conversation[0];
-    const tail = conversation.slice(-(maxForFinal - 2));
+    const tailSize = maxForFinal - 2;
+    const tail = conversation.slice(-tailSize);
+    const droppedMessages = conversation.slice(1, conversation.length - tailSize);
+
+    this.log.info(`Truncating for final call: summarizing ${droppedMessages.length} messages.`);
+
+    const summary = await this.summarizeDroppedMessages(droppedMessages);
+
     return [
       firstMessage,
       {
         role: 'system',
-        content: `[Context truncated for final summary: ${conversation.length - 1 - tail.length} earlier messages were removed.]`,
+        content: `[Context Summary for Final Response: The following is an LLM-generated summary of ${droppedMessages.length} earlier messages.]
+
+${summary}`,
       },
       ...tail,
     ];

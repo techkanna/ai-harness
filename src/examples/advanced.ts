@@ -1,5 +1,5 @@
 import { createLocalLlmClient } from '../client.js';
-import { AgentHarness } from '../agent.js';
+import { AgentHarness } from '../agent/index.js';
 import { tools } from '../tools.js';
 import { SYSTEM_PROMPT } from '../prompts.js';
 
