@@ -1,8 +1,8 @@
-import type { LocalLlmClient } from '../client.js';
-import type { Tool, ApiToolDefinition, ConversationMessage, AgentEvent } from '../types.js';
+import type { LocalLlmClient } from './client.js';
+import type { Tool, ApiToolDefinition, ConversationMessage, AgentEvent } from './types.js';
 
 // Re-export types so consumers can import from either place
-export type { Tool, AgentEvent } from '../types.js';
+export type { Tool, AgentEvent } from './types.js';
 
 // ─── Logger ──────────────────────────────────────────────────────────────────
 
