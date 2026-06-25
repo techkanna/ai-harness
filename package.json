@@ -4,7 +4,7 @@
   "description": "Minimalistic AI agent CLI for local models.",
   "type": "module",
   "bin": {
-    "sk": "./dist/src/cli.js"
+    "sk": "./dist/src/main.js"
   },
   "scripts": {
     "build": "tsc",
